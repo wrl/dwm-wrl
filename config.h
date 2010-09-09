@@ -18,13 +18,14 @@ static const char *tags[] = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "10" 
 
 static const Rule rules[] = {
 	/* class      instance    title       tags mask     isfloating   monitor */
-	{ "Gimp",     NULL,       NULL,       0,            True,        -1 },
+	{ "Gimp",     NULL,       NULL,       0,            True,        -1},
 	{ "Seq24",    NULL,       NULL,       0,            True,        -1},
 	{ "Skype",    NULL,       NULL,       0,            True,        -1},
 	{ "Resynth",  NULL,       NULL,       0,            True,        -1},
 	{ "Elicit",   NULL,       NULL,       0,            True,        -1},
 	{ "MPlayer",  NULL,       NULL,       0,            True,        -1},
-	{ "Firefox",  NULL,       NULL,       1 << 8,       False,       -1 },
+	{ "Firefox",  NULL,       NULL,       1 << 8,       False,       -1},
+	{ "Pidgin",   NULL,       NULL,       0,            True,        -1},
 };
 
 /* layout(s) */
@@ -54,9 +55,10 @@ static const Layout layouts[] = {
 static const char *dmenucmd[] = { "dmenu_run", "-fn", font, "-nb", normbgcolor, "-nf", normfgcolor, "-sb", selbgcolor, "-sf", selfgcolor, NULL };
 static const char *termcmd[]  = { "xterm", NULL };
 
-static const char *volupcmd[] = { "amixer", "-q", "-c", "0", "set", "Headphone", "5+", "unmute", NULL };
-static const char *voldncmd[] = { "amixer", "-q", "-c", "0", "set", "Headphone", "5-", "unmute", NULL };
-static const char *volmtcmd[] = { "amixer", "-q", "-c", "0", "set", "Headphone", "toggle", NULL };
+#define MIXER_CTL "Master"
+static const char *volupcmd[] = { "amixer", "-q", "-c", "0", "set", MIXER_CTL, "5+", "unmute", NULL };
+static const char *voldncmd[] = { "amixer", "-q", "-c", "0", "set", MIXER_CTL, "5-", "unmute", NULL };
+static const char *volmtcmd[] = { "amixer", "-q", "-c", "0", "set", MIXER_CTL, "toggle", NULL };
 
 static Key keys[] = {
 	/* modifier                     key        function        argument */
