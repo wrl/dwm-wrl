@@ -122,26 +122,6 @@ typedef struct {
 	void (*arrange)(Monitor *);
 } Layout;
 
-struct Monitor {
-	char ltsymbol[16];
-	float mfact;
-	int num;
-	int by;               /* bar geometry */
-	int mx, my, mw, mh;   /* screen size */
-	int wx, wy, ww, wh;   /* window area  */
-	unsigned int seltags;
-	unsigned int sellt;
-	unsigned int tagset[2];
-	Bool showbar;
-	Bool topbar;
-	Client *clients;
-	Client *sel;
-	Client *stack;
-	Monitor *next;
-	Window barwin;
-	const Layout *lt[2];
-};
-
 typedef struct {
 	const char *class;
 	const char *instance;
@@ -157,6 +137,8 @@ static Bool applysizehints(Client *c, int *x, int *y, int *w, int *h, Bool inter
 static void arrange(Monitor *m);
 static void arrangemon(Monitor *m);
 static void attach(Client *c);
+static void attachabove(Client *c);
+static void smartattach(Client *c);
 static void attachstack(Client *c);
 static void buttonpress(XEvent *e);
 static void checkotherwm(void);
@@ -175,6 +157,7 @@ static void die(const char *errstr, ...);
 static Monitor *dirtomon(int dir);
 static void drawbar(Monitor *m);
 static void drawbars(void);
+static void drawvline(unsigned long col[ColLast]);
 static void drawsquare(Bool filled, Bool empty, Bool invert, unsigned long col[ColLast]);
 static void drawtext(const char *text, unsigned long col[ColLast], Bool invert);
 static void enternotify(XEvent *e);
@@ -192,6 +175,7 @@ static void grabkeys(void);
 static void initfont(const char *fontstr);
 static Bool isprotodel(Client *c);
 static void keypress(XEvent *e);
+static void keyrelease(XEvent *e);
 static void killclient(const Arg *arg);
 static void manage(Window w, XWindowAttributes *wa);
 static void mappingnotify(XEvent *e);
@@ -220,7 +204,9 @@ static void tag(const Arg *arg);
 static void tagmon(const Arg *arg);
 static int textnw(const char *text, unsigned int len);
 static void tile(Monitor *);
+static void bstack(Monitor *);
 static void togglebar(const Arg *arg);
+static void popupbar(Bool show);
 static void togglefloating(const Arg *arg);
 static void toggletag(const Arg *arg);
 static void toggleview(const Arg *arg);
@@ -261,6 +247,7 @@ static void (*handler[LASTEvent]) (XEvent *) = {
 	[Expose] = expose,
 	[FocusIn] = focusin,
 	[KeyPress] = keypress,
+	[KeyRelease] = keyrelease,
 	[MappingNotify] = mappingnotify,
 	[MapRequest] = maprequest,
 	[PropertyNotify] = propertynotify,
@@ -277,6 +264,31 @@ static Window root;
 
 /* configuration, allows nested code to access above variables */
 #include "config.h"
+
+struct Monitor {
+	char ltsymbol[16];
+	float mfact;
+	int num;
+	int by;               /* bar geometry */
+	int mx, my, mw, mh;   /* screen size */
+	int wx, wy, ww, wh;   /* window area  */
+	unsigned int seltags;
+	unsigned int sellt;
+	unsigned int tagset[2];
+	Bool showbar;
+	Bool popupbar;
+	Bool topbar;
+	Client *clients;
+	Client *sel;
+	Client *stack;
+	Monitor *next;
+	Window barwin;
+	const Layout *lt[2];
+	int curtag;
+	int prevtag;
+	const Layout *lts[LENGTH(tags) + 1];
+	double mfacts[LENGTH(tags) + 1];
+};
 
 /* compile-time check if all tags fit into an unsigned int bit array. */
 struct NumTags { char limitexceeded[LENGTH(tags) > 31 ? -1 : 1]; };
@@ -409,6 +421,33 @@ void
 attach(Client *c) {
 	c->next = c->mon->clients;
 	c->mon->clients = c;
+}
+
+void
+attachbelow(Client *c) {
+	c->next = c->mon->sel->next;
+	c->mon->sel->next = c;
+}
+
+void
+attachabove(Client *c) {
+	Client *at;
+	for (at = c->mon->clients; at->next != c->mon->sel; at = at->next);
+	c->next = at->next;
+	at->next = c;
+}
+
+void
+smartattach(Client *c) {
+	if(c->mon->sel == NULL || c->mon->sel->isfloating) {
+		attach(c);
+		return;
+	}
+
+	if(nexttiled(c->mon->clients) == c->mon->sel)
+		attachbelow(c);
+	else
+		attachabove(c);
 }
 
 void
@@ -683,12 +722,15 @@ dirtomon(int dir) {
 
 void
 drawbar(Monitor *m) {
-	int x;
-	unsigned int i, occ = 0, urg = 0;
+	int x, ow, mw = 0, extra, tw;
+	unsigned int i, n = 0, occ = 0, urg = 0;
 	unsigned long *col;
-	Client *c;
+	Client *c, *firstvis, *lastvis = NULL;
+	DC seldc;
 
 	for(c = m->clients; c; c = c->next) {
+		if(ISVISIBLE(c))
+			n++;
 		occ |= c->tags;
 		if(c->isurgent)
 			urg |= c->tags;
@@ -717,16 +759,62 @@ drawbar(Monitor *m) {
 	}
 	else
 		dc.x = m->ww;
-	if((dc.w = dc.x - x) > bh) {
-		dc.x = x;
-		if(m->sel) {
-			col = m == selmon ? dc.sel : dc.norm;
-			drawtext(m->sel->name, col, False);
-			drawsquare(m->sel->isfixed, m->sel->isfloating, False, col);
+
+	for(c = m->clients; c && !ISVISIBLE(c); c = c->next);
+	firstvis = c;
+
+	col = m == selmon ? dc.sel : dc.norm;
+	dc.w = dc.x - x;
+	dc.x = x;
+
+	if(n > 0) {
+		mw = dc.w / n;
+		extra = 0;
+		seldc = dc;
+		i = 0;
+
+		while(c) {
+			lastvis = c;
+			tw = TEXTW(c->name);
+			if(tw < mw) extra += (mw - tw); else i++;
+			for(c = c->next; c && !ISVISIBLE(c); c = c->next);
 		}
-		else
-			drawtext(NULL, dc.norm, False);
+
+		if(i > 0) mw += extra / i;
+
+		c = firstvis;
+		x = dc.x;
 	}
+
+	while(dc.w > bh) {
+		if(c) {
+			ow = dc.w;
+			tw = TEXTW(c->name);
+			dc.w = MIN(ow, tw);
+
+			if(dc.w > mw) dc.w = mw;
+			if(m->sel == c) seldc = dc;
+			if(c == lastvis) dc.w = ow;
+
+			drawtext(c->name, col, False);
+			if(c != firstvis) drawvline(dc.norm);
+			drawsquare(c->isfixed, c->isfloating, False, col);
+
+			dc.x += dc.w;
+			dc.w = ow - dc.w;
+			for(c = c->next; c && !ISVISIBLE(c); c = c->next);
+		} else {
+			drawtext(NULL, dc.norm, False);
+			break;
+		}
+	}
+
+	if(m == selmon && m->sel && ISVISIBLE(m->sel)) {
+		dc = seldc;
+		drawtext(m->sel->name, dc.norm, False);
+		drawsquare(m->sel->isfixed, m->sel->isfloating, True, col);
+	}
+
 	XCopyArea(dpy, dc.drawable, m->barwin, dc.gc, 0, 0, m->ww, bh, 0, 0);
 	XSync(dpy, False);
 }
@@ -737,6 +825,15 @@ drawbars(void) {
 
 	for(m = mons; m; m = m->next)
 		drawbar(m);
+}
+
+void
+drawvline(unsigned long col[ColLast]) {
+	XGCValues gcv;
+
+	gcv.foreground = col[ColBG];
+	XChangeGC(dpy, dc.gc, GCForeground, &gcv);
+	XDrawLine(dpy, dc.drawable, dc.gc, dc.x, dc.y, dc.x, dc.y + (dc.font.ascent + dc.font.descent + 2));
 }
 
 void
@@ -974,6 +1071,10 @@ grabkeys(void) {
 		KeyCode code;
 
 		XUngrabKey(dpy, AnyKey, AnyModifier, root);
+
+		XGrabKey(dpy, XKeysymToKeycode(dpy, XK_Menu), AnyModifier, root,
+				True, GrabModeAsync, GrabModeAsync);
+
 		for(i = 0; i < LENGTH(keys); i++) {
 			if((code = XKeysymToKeycode(dpy, keys[i].keysym)))
 				for(j = 0; j < LENGTH(modifiers); j++)
@@ -1055,11 +1156,30 @@ keypress(XEvent *e) {
 
 	ev = &e->xkey;
 	keysym = XKeycodeToKeysym(dpy, (KeyCode)ev->keycode, 0);
+	if( keysym == XK_Menu ) {
+		popupbar(1);
+		return;
+	}
+
 	for(i = 0; i < LENGTH(keys); i++)
 		if(keysym == keys[i].keysym
 		&& CLEANMASK(keys[i].mod) == CLEANMASK(ev->state)
 		&& keys[i].func)
 			keys[i].func(&(keys[i].arg));
+
+	popupbar(selmon->popupbar);
+}
+
+void
+keyrelease(XEvent *e) {
+	KeySym keysym;
+	XKeyEvent *ev;
+
+	ev = &e->xkey;
+	keysym = XKeycodeToKeysym(dpy, (KeyCode)ev->keycode, 0);
+
+	if( keysym == XK_Menu )
+		popupbar(0);
 }
 
 void
@@ -1144,7 +1264,7 @@ manage(Window w, XWindowAttributes *wa) {
 		c->isfloating = c->oldstate = trans != None || c->isfixed;
 	if(c->isfloating)
 		XRaiseWindow(dpy, c->win);
-	attach(c);
+	smartattach(c);
 	attachstack(c);
 	XMoveResizeWindow(dpy, c->win, c->x + 2 * sw, c->y, c->w, c->h); /* some windows require this */
 	XMapWindow(dpy, c->win);
@@ -1214,6 +1334,8 @@ movemouse(const Arg *arg) {
 			handler[ev.type](&ev);
 			break;
 		case MotionNotify:
+			while( XCheckMaskEvent(dpy, MotionNotify, &ev) );
+
 			nx = ocx + (ev.xmotion.x - x);
 			ny = ocy + (ev.xmotion.y - y);
 			if(snap && nx >= selmon->wx && nx <= selmon->wx + selmon->ww
@@ -1287,8 +1409,7 @@ propertynotify(XEvent *e) {
 		}
 		if(ev->atom == XA_WM_NAME || ev->atom == netatom[NetWMName]) {
 			updatetitle(c);
-			if(c == c->mon->sel)
-				drawbar(c->mon);
+			drawbar(c->mon);
 		}
 	}
 }
@@ -1377,6 +1498,8 @@ resizemouse(const Arg *arg) {
 			handler[ev.type](&ev);
 			break;
 		case MotionNotify:
+			while( XCheckMaskEvent(dpy, MotionNotify, &ev) );
+
 			nw = MAX(ev.xmotion.x - ocx - 2 * c->bw + 1, 1);
 			nh = MAX(ev.xmotion.y - ocy - 2 * c->bw + 1, 1);
 			if(snap && nw >= selmon->wx && nw <= selmon->wx + selmon->ww
@@ -1490,7 +1613,7 @@ setlayout(const Arg *arg) {
 	if(!arg || !arg->v || arg->v != selmon->lt[selmon->sellt])
 		selmon->sellt ^= 1;
 	if(arg && arg->v)
-		selmon->lt[selmon->sellt] = (Layout *)arg->v;
+		selmon->lt[selmon->sellt] = selmon->lts[selmon->curtag] = (Layout *)arg->v;
 	strncpy(selmon->ltsymbol, selmon->lt[selmon->sellt]->symbol, sizeof selmon->ltsymbol);
 	if(selmon->sel)
 		arrange(selmon);
@@ -1508,13 +1631,15 @@ setmfact(const Arg *arg) {
 	f = arg->f < 1.0 ? arg->f + selmon->mfact : arg->f - 1.0;
 	if(f < 0.1 || f > 0.9)
 		return;
-	selmon->mfact = f;
+	selmon->mfact = selmon->mfacts[selmon->curtag] = f;
 	arrange(selmon);
 }
 
 void
 setup(void) {
 	XSetWindowAttributes wa;
+	Monitor *m;
+	unsigned int i;
 
 	/* clean up any zombies immediately */
 	sigchld(0);
@@ -1551,7 +1676,21 @@ setup(void) {
 	XSetLineAttributes(dpy, dc.gc, 1, LineSolid, CapButt, JoinMiter);
 	if(!dc.font.set)
 		XSetFont(dpy, dc.gc, dc.font.xfont->fid);
-	/* init bars */
+	/* init tags */
+	for(m = mons; m; m = m->next)
+		m->curtag = m->prevtag = 1;
+	/* init mfacts */
+	for(m = mons; m; m = m->next) {
+		for(i=0; i < LENGTH(tags) + 1 ; i++) {
+			m->mfacts[i] = m->mfact;
+		}
+	}
+	/* init layouts */
+	for(m = mons; m; m = m->next) {
+		for(i=0; i < LENGTH(tags) + 1; i++) {
+			m->lts[i] = &layouts[0];
+		}
+	}
 	updatebars();
 	updatestatus();
 	/* EWMH support per view */
@@ -1661,11 +1800,57 @@ tile(Monitor *m) {
 }
 
 void
+bstack(Monitor *m) {
+	int x, y, h, w, mh;
+	unsigned int i, n;
+	Client *c;
+
+	for(n = 0, c = nexttiled(m->clients); c; c = nexttiled(c->next), n++);
+	if(n == 0)
+		return;
+	/* master */
+	c = nexttiled(m->clients);
+	mh = m->mfact * m->wh;
+	resize(c, m->wx, m->wy, m->ww - 2 * c->bw, (n == 1 ? m->wh : mh) - 2 * c->bw, False);
+	if(--n == 0)
+		return;
+	/* tile stack */
+	x = m->wx;
+	y = (m->wy + mh > c->y + c->h) ? c->y + c->h + 2 * c->bw : m->wy + mh;
+	w = m->ww / n;
+	h = (m->wy + mh > c->y + c->h) ? m->wy + m->wh - y : m->wh - mh;
+	if(w < bh)
+		w = m->ww;
+	for(i = 0, c = nexttiled(c->next); c; c = nexttiled(c->next), i++) {
+		resize(c, x, y, /* remainder */ ((i + 1 == n)
+		       ? m->wx + m->ww - x - 2 * c->bw : w - 2 * c->bw), h - 2 * c->bw, False);
+		if(w != m->ww)
+			x = c->x + WIDTH(c);
+	}
+}
+
+void
 togglebar(const Arg *arg) {
 	selmon->showbar = !selmon->showbar;
 	updatebarpos(selmon);
 	XMoveResizeWindow(dpy, selmon->barwin, selmon->wx, selmon->by, selmon->ww, bh);
 	arrange(selmon);
+}
+
+void
+popupbar(Bool show) {
+	if(selmon->showbar || show == selmon->popupbar)
+		return;
+
+	selmon->popupbar = show;
+	if(show) {
+		selmon->by = selmon->topbar ? selmon->wy : selmon->wy + selmon->wh;
+		XRaiseWindow(dpy, selmon->barwin);
+	}
+	else
+		selmon->by = -bh;
+
+	XMoveResizeWindow(dpy, selmon->barwin, selmon->wx, selmon->by, selmon->ww, bh);
 }
 
 void
@@ -1682,12 +1867,25 @@ togglefloating(const Arg *arg) {
 void
 toggletag(const Arg *arg) {
 	unsigned int newtags;
+	unsigned int i;
 
 	if(!selmon->sel)
 		return;
 	newtags = selmon->sel->tags ^ (arg->ui & TAGMASK);
 	if(newtags) {
 		selmon->sel->tags = newtags;
+		if(newtags == ~0) {
+			selmon->prevtag = selmon->curtag;
+			selmon->curtag = 0;
+		}
+		if(!(newtags & 1 << (selmon->curtag - 1))) {
+			selmon->prevtag = selmon->curtag;
+			for (i=0; !(newtags & 1 << i); i++);
+			selmon->curtag = i + 1;
+		}
+		selmon->sel->tags = newtags;
+		selmon->lt[selmon->sellt] = selmon->lts[selmon->curtag];
+		selmon->mfact = selmon->mfacts[selmon->curtag];
 		arrange(selmon);
 	}
 }
@@ -1954,11 +2152,27 @@ updatewmhints(Client *c) {
 
 void
 view(const Arg *arg) {
+	unsigned int i;
+
 	if((arg->ui & TAGMASK) == selmon->tagset[selmon->seltags])
 		return;
 	selmon->seltags ^= 1; /* toggle sel tagset */
-	if(arg->ui & TAGMASK)
+	if(arg->ui & TAGMASK) {
 		selmon->tagset[selmon->seltags] = arg->ui & TAGMASK;
+		selmon->prevtag = selmon->curtag;
+		if(arg->ui == ~0)
+			selmon->curtag = 0;
+		else {
+			for (i=0; !(arg->ui & 1 << i); i++);
+			selmon->curtag = i + 1;
+		}
+	} else {
+		selmon->prevtag= selmon->curtag ^ selmon->prevtag;
+		selmon->curtag^= selmon->prevtag;
+		selmon->prevtag= selmon->curtag ^ selmon->prevtag;
+	}
+	selmon->lt[selmon->sellt]= selmon->lts[selmon->curtag];
+	selmon->mfact = selmon->mfacts[selmon->curtag];
 	arrange(selmon);
 }
 
