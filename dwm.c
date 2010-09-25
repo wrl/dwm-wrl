@@ -649,6 +649,7 @@ configurerequest(XEvent *e) {
 
 Monitor *
 createmon(void) {
+	unsigned int i;
 	Monitor *m;
 
 	if(!(m = (Monitor *)calloc(1, sizeof(Monitor))))
@@ -660,6 +661,14 @@ createmon(void) {
 	m->lt[0] = &layouts[0];
 	m->lt[1] = &layouts[1 % LENGTH(layouts)];
 	strncpy(m->ltsymbol, layouts[0].symbol, sizeof m->ltsymbol);
+	m->curtag = m->prevtag = 1;
+
+	/* pertag patch */
+	for(i=0; i < LENGTH(tags) + 1; i++) {
+		m->lts[i] = &layouts[0];
+		m->mfacts[i] = mfact;
+	}
+
 	return m;
 }
 
@@ -1638,8 +1647,6 @@ setmfact(const Arg *arg) {
 void
 setup(void) {
 	XSetWindowAttributes wa;
-	Monitor *m;
-	unsigned int i;
 
 	/* clean up any zombies immediately */
 	sigchld(0);
@@ -1676,21 +1683,6 @@ setup(void) {
 	XSetLineAttributes(dpy, dc.gc, 1, LineSolid, CapButt, JoinMiter);
 	if(!dc.font.set)
 		XSetFont(dpy, dc.gc, dc.font.xfont->fid);
-	/* init tags */
-	for(m = mons; m; m = m->next)
-		m->curtag = m->prevtag = 1;
-	/* init mfacts */
-	for(m = mons; m; m = m->next) {
-		for(i=0; i < LENGTH(tags) + 1 ; i++) {
-			m->mfacts[i] = m->mfact;
-		}
-	}
-	/* init layouts */
-	for(m = mons; m; m = m->next) {
-		for(i=0; i < LENGTH(tags) + 1; i++) {
-			m->lts[i] = &layouts[0];
-		}
-	}
 	updatebars();
 	updatestatus();
 	/* EWMH support per view */
